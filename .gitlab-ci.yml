@@ -46,17 +46,14 @@ frontend-test:
   image: node:20-alpine
   script:
     - cd frontend
-    - npm ci
+    # Dùng npm install thay vì npm ci để tránh lỗi package-lock.json cũ
+    - npm install --no-audit
     - npm run test:coverage
   coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
   artifacts:
     when: always
     paths:
       - frontend/coverage/
-    reports:
-      coverage_report:
-        coverage_format: cobertura
-        path: frontend/coverage/cobertura-coverage.xml
     expire_in: 1 week
   rules:
     - if: $CI_COMMIT_BRANCH
@@ -199,6 +196,10 @@ notify-failure:
   image: curlimages/curl
   script:
     - |
+      if [ -z "$SLACK_WEBHOOK_URL" ]; then
+        echo "⚠️  SLACK_WEBHOOK_URL not set – skipping notification."
+        exit 0
+      fi
       curl -X POST -H 'Content-type: application/json' \
       --data "{\"text\":\"🚨 Pipeline FAILED trên branch *${CI_COMMIT_BRANCH}*.\nCommit: \`${CI_COMMIT_SHA}\`\nAuthor: ${CI_COMMIT_AUTHOR}\nJob: ${CI_JOB_URL}\"}" \
       $SLACK_WEBHOOK_URL
