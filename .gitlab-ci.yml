@@ -1,0 +1,206 @@
+stages:
+  - lint
+  - test
+  - sonarqube     # SonarQube static analysis
+  - build
+  - docker
+  - deploy
+  - notify
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  # SonarQube – khai báo trong Settings > CI/CD > Variables:
+  #   SONAR_HOST_URL  = http://<sonarqube-server>:9000
+  #   SONAR_TOKEN     = sqa_xxxxxxxxxxxx
+  # Deploy – khai báo thêm:
+  #   SSH_PRIVATE_KEY, DEPLOY_USER, DEPLOY_HOST, SLACK_WEBHOOK_URL
+
+# ─── Cache ───────────────────────────────────────────────────
+cache:
+  paths:
+    - frontend/node_modules/
+    - ~/.cache/pip
+    - ~/.sonar/cache
+
+# ════════════════════════════════════════════════════════════
+# LINT STAGE
+# ════════════════════════════════════════════════════════════
+
+frontend-lint:
+  stage: lint
+  image: node:20-alpine
+  script:
+    - cd frontend
+    - npm ci
+    - npm run lint
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+# ════════════════════════════════════════════════════════════
+# TEST STAGE
+# ════════════════════════════════════════════════════════════
+
+frontend-test:
+  stage: test
+  image: node:20-alpine
+  script:
+    - cd frontend
+    - npm ci
+    - npm run test:coverage
+  coverage: '/All files[^|]*\|[^|]*\s+([\d\.]+)/'
+  artifacts:
+    when: always
+    paths:
+      - frontend/coverage/
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: frontend/coverage/cobertura-coverage.xml
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+backend-test:
+  stage: test
+  image: python:3.11-slim
+  script:
+    - cd backend
+    - pip install --no-cache-dir -r requirements.txt
+    - pip install pytest-cov
+    - python -m pytest tests/ -v
+      --cov=app
+      --cov-report=xml:coverage.xml
+      --cov-report=term-missing
+  coverage: '/TOTAL.*\s+(\d+%)$/'
+  artifacts:
+    when: always
+    paths:
+      - backend/coverage.xml
+    reports:
+      coverage_report:
+        coverage_format: cobertura
+        path: backend/coverage.xml
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+# ════════════════════════════════════════════════════════════
+# SONARQUBE STAGE
+# ════════════════════════════════════════════════════════════
+
+sonarqube-analysis:
+  stage: sonarqube
+  image:
+    name: sonarsource/sonar-scanner-cli:latest
+    entrypoint: [""]
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+    GIT_DEPTH: "0"
+  script:
+    - sonar-scanner
+      -Dsonar.projectKey=${CI_PROJECT_NAME}
+      -Dsonar.projectName="${CI_PROJECT_NAME}"
+      -Dsonar.projectVersion="${CI_COMMIT_SHORT_SHA}"
+      -Dsonar.sources=frontend/src,backend/app
+      -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/__pycache__/**,**/venv/**
+      -Dsonar.tests=frontend/src,backend/tests
+      -Dsonar.test.inclusions=**/*.test.js,**/*.test.jsx,**/test_*.py
+      -Dsonar.javascript.lcov.reportPaths=frontend/coverage/lcov.info
+      -Dsonar.python.coverage.reportPaths=backend/coverage.xml
+      -Dsonar.host.url=${SONAR_HOST_URL}
+      -Dsonar.token=${SONAR_TOKEN}
+      -Dsonar.qualitygate.wait=true
+  allow_failure: true
+  needs:
+    - frontend-test
+    - backend-test
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"'
+
+# ════════════════════════════════════════════════════════════
+# BUILD STAGE
+# ════════════════════════════════════════════════════════════
+
+frontend-build:
+  stage: build
+  image: node:20-alpine
+  script:
+    - cd frontend
+    - npm ci
+    - npm run build
+  artifacts:
+    paths:
+      - frontend/dist/
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_BRANCH
+
+# ════════════════════════════════════════════════════════════
+# DOCKER STAGE
+# ════════════════════════════════════════════════════════════
+
+.docker-build-template: &docker-build-template
+  stage: docker
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin $CI_REGISTRY
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "develop"'
+
+docker-build-frontend:
+  <<: *docker-build-template
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHA -t $CI_REGISTRY_IMAGE/frontend:latest ./frontend
+    - docker push $CI_REGISTRY_IMAGE/frontend:$CI_COMMIT_SHA
+    - docker push $CI_REGISTRY_IMAGE/frontend:latest
+
+docker-build-backend:
+  <<: *docker-build-template
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHA -t $CI_REGISTRY_IMAGE/backend:latest ./backend
+    - docker push $CI_REGISTRY_IMAGE/backend:$CI_COMMIT_SHA
+    - docker push $CI_REGISTRY_IMAGE/backend:latest
+
+# ════════════════════════════════════════════════════════════
+# DEPLOY STAGE (Manual Approval)
+# ════════════════════════════════════════════════════════════
+
+deploy-staging:
+  stage: deploy
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache openssh-client
+    - mkdir -p ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+  script:
+    - echo "Deploying to staging server..."
+    - ssh -o StrictHostKeyChecking=no $DEPLOY_USER@$DEPLOY_HOST
+      "cd /opt/final-devops &&
+      docker compose pull &&
+      docker compose up -d --remove-orphans"
+  environment:
+    name: staging
+    url: http://$DEPLOY_HOST:3000
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+
+# ════════════════════════════════════════════════════════════
+# NOTIFY STAGE
+# ════════════════════════════════════════════════════════════
+
+notify-failure:
+  stage: notify
+  image: curlimages/curl
+  script:
+    - |
+      curl -X POST -H 'Content-type: application/json' \
+      --data "{\"text\":\"🚨 Pipeline FAILED trên branch *${CI_COMMIT_BRANCH}*.\nCommit: \`${CI_COMMIT_SHA}\`\nAuthor: ${CI_COMMIT_AUTHOR}\nJob: ${CI_JOB_URL}\"}" \
+      $SLACK_WEBHOOK_URL
+  when: on_failure
+  rules:
+    - if: $CI_COMMIT_BRANCH

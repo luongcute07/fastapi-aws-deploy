@@ -1,0 +1,138 @@
+services:
+
+  # ════════════════════════════════════════
+  # PostgreSQL 15 – Database
+  # ════════════════════════════════════════
+  db:
+    image: postgres:15
+    container_name: final-devops-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: user_management
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d user_management"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - app-network
+
+  # ════════════════════════════════════════
+  # FastAPI – Backend
+  # ════════════════════════════════════════
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: final-devops-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    ports:
+      - "8000:8000"
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host", "0.0.0.0",
+        "--port", "8000",
+        "--reload"
+      ]
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend/app:/app/app
+    networks:
+      - app-network
+
+  # ════════════════════════════════════════
+  # React + Nginx – Frontend
+  # ════════════════════════════════════════
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: final-devops-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+  # ════════════════════════════════════════
+  # SonarQube – Code Quality (optional dev)
+  # ════════════════════════════════════════
+  sonarqube:
+    image: sonarqube:10-community
+    container_name: final-devops-sonarqube
+    restart: unless-stopped
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonar-db:5432/sonar
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: sonar
+    ports:
+      - "9000:9000"
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+    depends_on:
+      sonar-db:
+        condition: service_healthy
+    networks:
+      - app-network
+    profiles:
+      - sonar   # Chỉ chạy khi: docker compose --profile sonar up
+
+  sonar-db:
+    image: postgres:15
+    container_name: final-devops-sonar-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: sonar
+      POSTGRES_DB: sonar
+    volumes:
+      - sonar_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar -d sonar"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+    profiles:
+      - sonar
+
+# ════════════════════════════════════════
+# Named Volumes
+# ════════════════════════════════════════
+volumes:
+  postgres_data:
+    name: final-devops_postgres_data
+  sonarqube_data:
+    name: final-devops_sonarqube_data
+  sonarqube_extensions:
+    name: final-devops_sonarqube_extensions
+  sonarqube_logs:
+    name: final-devops_sonarqube_logs
+  sonar_postgres_data:
+    name: final-devops_sonar_postgres_data
+
+# ════════════════════════════════════════
+# Custom Network
+# ════════════════════════════════════════
+networks:
+  app-network:
+    driver: bridge
+    name: final-devops-network
