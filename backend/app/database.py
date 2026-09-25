@@ -6,18 +6,28 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/user_management"
-)
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
 
-# SQLite cần connect_args đặc biệt, PostgreSQL thì không
-if DATABASE_URL.startswith("sqlite"):
+# Fallback to SQLite if psycopg2 is missing
+try:
+    if DATABASE_URL.startswith("sqlite"):
+        engine = create_engine(
+            DATABASE_URL, connect_args={"check_same_thread": False}
+        )
+    else:
+        try:
+            import psycopg2  # noqa: F401
+            engine = create_engine(DATABASE_URL)
+        except ImportError:
+            DATABASE_URL = "sqlite:///./app.db"
+            engine = create_engine(
+                DATABASE_URL, connect_args={"check_same_thread": False}
+            )
+except Exception:
+    DATABASE_URL = "sqlite:///./app.db"
     engine = create_engine(
         DATABASE_URL, connect_args={"check_same_thread": False}
     )
-else:
-    engine = create_engine(DATABASE_URL)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
