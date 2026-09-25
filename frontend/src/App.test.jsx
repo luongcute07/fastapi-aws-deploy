@@ -31,13 +31,16 @@ describe('App Component', () => {
   it('renders header, title, and users table', async () => {
     render(<App />)
 
-    // Check title in header
-    expect(screen.getByText('User Management System')).toBeInTheDocument()
-    expect(
-      screen.getByText(/Final DevOps/i)
-    ).toBeInTheDocument()
+    // Check title in header (h1 - only 1 element)
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(
+      'User Management System'
+    )
 
-    // Check loaded user
+    // Check subtitle text exists (dùng getAllByText vì có thể nhiều element)
+    const devopsTexts = screen.getAllByText(/Final DevOps/i)
+    expect(devopsTexts.length).toBeGreaterThan(0)
+
+    // Check loaded user appears after API resolves
     const userName = await screen.findByText('Nguyen Van A')
     expect(userName).toBeInTheDocument()
   })
