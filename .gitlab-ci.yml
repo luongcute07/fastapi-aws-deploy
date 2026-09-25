@@ -102,6 +102,7 @@ sonarqube-analysis:
       -Dsonar.projectKey=${CI_PROJECT_NAME}
       -Dsonar.projectName="${CI_PROJECT_NAME}"
       -Dsonar.projectVersion="${CI_COMMIT_SHORT_SHA}"
+      -Dsonar.organization=${SONAR_ORGANIZATION}
       -Dsonar.sources=frontend/src,backend/app
       -Dsonar.exclusions=**/node_modules/**,**/dist/**,**/__pycache__/**,**/venv/**
       -Dsonar.tests=frontend/src,backend/tests
