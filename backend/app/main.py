@@ -7,6 +7,11 @@ from .database import engine, get_db, Base
 from .models import User
 from .schemas import UserCreate, UserUpdate, UserResponse
 
+try:
+    from app.routers.upload import router as upload_router
+except ImportError:
+    from routers.upload import router as upload_router
+
 # Create tables on startup
 Base.metadata.create_all(bind=engine)
 
@@ -15,6 +20,9 @@ app = FastAPI(
     description="Final DevOps – CI/CD with SonarQube",
     version="1.0.0",
 )
+
+# ── Routers ───────────────────────────────────────────────────
+app.include_router(upload_router)
 
 # ── CORS ──────────────────────────────────────────────────────
 app.add_middleware(

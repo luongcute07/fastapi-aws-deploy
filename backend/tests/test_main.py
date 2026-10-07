@@ -132,3 +132,41 @@ def test_delete_user_not_found():
     """DELETE /users/999 returns 404."""
     response = client.delete("/users/999")
     assert response.status_code == 404
+
+
+def test_upload_file_success(monkeypatch):
+    """POST /upload uploads file to S3 successfully."""
+    from unittest.mock import MagicMock
+    import app.routers.upload as upload_module
+    import io
+
+    mock_s3 = MagicMock()
+    monkeypatch.setattr(upload_module, "s3", mock_s3)
+
+    test_file = io.BytesIO(b"dummy file content")
+    files = {"file": ("test.txt", test_file, "text/plain")}
+
+    response = client.post("/upload", files=files)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["message"] == "Upload thanh cong"
+    assert data["filename"] == "test.txt"
+    mock_s3.upload_fileobj.assert_called_once()
+
+
+def test_upload_file_failure(monkeypatch):
+    """POST /upload returns 500 when S3 upload fails."""
+    from unittest.mock import MagicMock
+    import app.routers.upload as upload_module
+    import io
+
+    mock_s3 = MagicMock()
+    mock_s3.upload_fileobj.side_effect = Exception("S3 upload failed")
+    monkeypatch.setattr(upload_module, "s3", mock_s3)
+
+    test_file = io.BytesIO(b"dummy content")
+    files = {"file": ("fail.txt", test_file, "text/plain")}
+
+    response = client.post("/upload", files=files)
+    assert response.status_code == 500
+    assert "S3 upload failed" in response.json()["detail"]
