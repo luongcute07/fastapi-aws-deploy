@@ -1,0 +1,81 @@
+name: Deploy to Amazon EC2
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy FastAPI to EC2
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: SSH to EC2, Pull Code, Rebuild & Restart Container
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script: |
+            set -e
+            echo "=========================================="
+            echo "🚀 STARTING DEPLOYMENT ON AWS EC2"
+            echo "=========================================="
+
+            # 1. Determine or create project directory
+            if [ -d "$HOME/fastapi-aws-deploy" ]; then
+              cd "$HOME/fastapi-aws-deploy"
+            elif [ -d "$HOME/app" ]; then
+              cd "$HOME/app"
+            elif [ -d "/home/ubuntu/app" ]; then
+              cd "/home/ubuntu/app"
+            else
+              echo "📁 Repository not found on EC2. Cloning repository..."
+              git clone https://github.com/${{ github.repository }}.git "$HOME/app"
+              cd "$HOME/app"
+            fi
+
+            echo "📂 Working directory: $(pwd)"
+
+            # 2. Pull the latest code
+            echo "🔄 Pulling latest code from main branch..."
+            git fetch origin main
+            git reset --hard origin/main
+
+            # 3. Create or update .env from GitHub Secrets
+            echo "🔐 Writing environment variables to .env..."
+            cat << 'EOF' > .env
+            DATABASE_URL=${{ secrets.DATABASE_URL }}
+            S3_BUCKET=${{ secrets.S3_BUCKET_NAME }}
+            S3_BUCKET_NAME=${{ secrets.S3_BUCKET_NAME }}
+            AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+            AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            AWS_REGION=ap-southeast-1
+            EOF
+
+            # 4. Rebuild image and restart container using docker compose
+            echo "🐳 Rebuilding Docker image and restarting container..."
+            if [ -f "docker-compose.yml" ]; then
+              docker compose down || true
+              docker compose up -d --build
+            else
+              docker build -t fastapi-app .
+              docker stop fastapi-app || true
+              docker rm fastapi-app || true
+              docker run -d --name fastapi-app -p 8000:8000 --env-file .env --restart always fastapi-app
+            fi
+
+            # 5. Verify deployment
+            echo "⏳ Waiting for container to initialize..."
+            sleep 5
+            echo "📋 Checking running Docker containers:"
+            docker ps
+            echo "=========================================="
+            echo "✅ DEPLOYMENT COMPLETED SUCCESSFULLY!"
+            echo "=========================================="
