@@ -8,9 +8,12 @@ from .models import User
 from .schemas import UserCreate, UserUpdate, UserResponse
 
 try:
-    from app.routers.upload import router as upload_router
-except ImportError:
-    from routers.upload import router as upload_router
+    from .routers.upload import router as upload_router
+except (ImportError, ValueError):
+    try:
+        from app.routers.upload import router as upload_router
+    except ImportError:
+        from routers.upload import router as upload_router
 
 # Create tables on startup
 Base.metadata.create_all(bind=engine)
