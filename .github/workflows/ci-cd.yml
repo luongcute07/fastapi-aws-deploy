@@ -1,0 +1,313 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ════════════════════════════════════════════════════════════
+  # 1. LINT STAGE (Frontend)
+  # ════════════════════════════════════════════════════════════
+  frontend-lint:
+    name: Frontend Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Frontend Dependencies & Lint
+        run: |
+          cd frontend
+          npm ci
+          npm run lint
+
+  # ════════════════════════════════════════════════════════════
+  # 2. TEST STAGE (Frontend & Backend in parallel)
+  # ════════════════════════════════════════════════════════════
+  frontend-test:
+    name: Frontend Tests & Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run Tests with Coverage
+        run: |
+          cd frontend
+          npm install --no-audit
+          npm run test:coverage
+
+      - name: Upload Frontend Coverage Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-coverage
+          path: frontend/coverage/
+          retention-days: 7
+
+  backend-test:
+    name: Backend Tests & Coverage
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: "sqlite:///./test.db"
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Dependencies
+        run: |
+          cd backend
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir -r requirements.txt pytest-cov
+
+      - name: Run Pytest with Coverage
+        run: |
+          cd backend
+          python -m pytest tests/ -v \
+            --cov=app \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing
+
+      - name: Upload Backend Coverage Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-coverage
+          path: backend/coverage.xml
+          retention-days: 7
+
+  # ════════════════════════════════════════════════════════════
+  # 3. SONARQUBE / SONARCLOUD STAGE
+  # ════════════════════════════════════════════════════════════
+  sonarqube:
+    name: SonarQube / SonarCloud Code Analysis
+    needs: [frontend-test, backend-test]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Frontend Coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-coverage
+          path: frontend/coverage
+
+      - name: Download Backend Coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-coverage
+          path: backend
+
+      - name: Check Sonar Token
+        id: check-sonar
+        run: |
+          if [ -z "${{ secrets.SONAR_TOKEN }}" ]; then
+            echo "has_token=false" >> $GITHUB_OUTPUT
+            echo "::warning ::SONAR_TOKEN secret not configured in GitHub Secrets. Skipping Sonar analysis."
+          else
+            echo "has_token=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: SonarQube / SonarCloud Scan
+        if: steps.check-sonar.outputs.has_token == 'true'
+        uses: SonarSource/sonarqube-scan-action@v4
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL || 'https://sonarcloud.io' }}
+
+  # ════════════════════════════════════════════════════════════
+  # 4. BUILD STAGE (Frontend Production Build)
+  # ════════════════════════════════════════════════════════════
+  frontend-build:
+    name: Frontend Production Build
+    needs: [frontend-lint, frontend-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build Frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist/
+          retention-days: 7
+
+  # ════════════════════════════════════════════════════════════
+  # 5. DOCKER STAGE (Build & Push to GHCR / Docker Hub)
+  # ════════════════════════════════════════════════════════════
+  docker-build:
+    name: Docker Build & Push
+    needs: [frontend-build, backend-test]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set Image Repository Name (Lowercase)
+        run: |
+          echo "REPO_LOWER=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Optional Log in to Docker Hub
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v3
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build & Push Frontend Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ghcr.io/${{ env.REPO_LOWER }}/frontend:latest
+            ghcr.io/${{ env.REPO_LOWER }}/frontend:${{ github.sha }}
+
+      - name: Build & Push Backend Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ghcr.io/${{ env.REPO_LOWER }}/backend:latest
+            ghcr.io/${{ env.REPO_LOWER }}/backend:${{ github.sha }}
+
+  # ════════════════════════════════════════════════════════════
+  # 6. DEPLOY STAGE (Deploy to AWS EC2 via SSH)
+  # ════════════════════════════════════════════════════════════
+  deploy:
+    name: Deploy to AWS EC2
+    needs: [docker-build]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check AWS EC2 Secrets
+        id: check-secrets
+        run: |
+          if [ -z "${{ secrets.EC2_HOST }}" ] || [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+            echo "has_secrets=false" >> $GITHUB_OUTPUT
+            echo "::warning ::EC2_HOST or SSH_PRIVATE_KEY secrets not yet configured. Skipping SSH deploy."
+          else
+            echo "has_secrets=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy to AWS EC2 via SSH
+        if: steps.check-secrets.outputs.has_secrets == 'true'
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER || 'ubuntu' }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+            set -e
+            echo "🚀 Connecting to AWS EC2 instance: ${{ secrets.EC2_HOST }}..."
+            TARGET_DIR="/home/${{ secrets.EC2_USER || 'ubuntu' }}/app"
+            
+            if [ ! -d "$TARGET_DIR" ]; then
+              echo "📁 Creating application directory at $TARGET_DIR..."
+              mkdir -p "$TARGET_DIR"
+              git clone https://github.com/${{ github.repository }}.git "$TARGET_DIR"
+              cd "$TARGET_DIR"
+            else
+              echo "🔄 Pulling latest changes from main branch..."
+              cd "$TARGET_DIR"
+              git fetch origin main
+              git reset --hard origin/main
+            fi
+
+            # Deploy using Docker Compose if available
+            if command -v docker >/dev/null 2>&1 && [ -f "docker-compose.yml" ]; then
+              echo "🐳 Restarting containers with Docker Compose..."
+              docker compose down || true
+              docker compose up -d --build
+            elif [ -f "backend/requirements.txt" ]; then
+              echo "🐍 Updating Python virtualenv and restarting FastAPI service..."
+              if [ ! -d "venv" ]; then
+                python3 -m venv venv
+              fi
+              source venv/bin/activate
+              pip install --no-cache-dir -r backend/requirements.txt
+              sudo systemctl restart fastapi || true
+            fi
+            echo "✅ Deployment on AWS EC2 completed successfully!"
+
+  # ════════════════════════════════════════════════════════════
+  # 7. NOTIFY STAGE (Slack alert on failure)
+  # ════════════════════════════════════════════════════════════
+  notify-failure:
+    name: Notify on Failure
+    needs: [frontend-lint, frontend-test, backend-test, sonarqube, frontend-build, docker-build, deploy]
+    if: always() && contains(needs.*.result, 'failure') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Slack Alert
+        if: env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\":\"🚨 *GitHub Actions Pipeline FAILED* on repository \`${{ github.repository }}\` (branch: *${{ github.ref_name }}*).\nCommit: \`${{ github.sha }}\`\nAuthor: ${{ github.actor }}\nRun: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+            "$SLACK_WEBHOOK_URL"
